@@ -53,3 +53,18 @@ output "subnet_ids" {
   value       = data.aws_subnets.default.ids
   description = "The IDs of the subnets where resources are created"
 }
+
+output "autoscaling_enabled" {
+  value       = var.enable_autoscaling
+  description = "Whether autoscaling policies are enabled"
+}
+
+output "scale_up_policy_arn" {
+  value       = var.enable_autoscaling ? aws_autoscaling_policy.scale_up[0].arn : null
+  description = "ARN of the scale up policy (if autoscaling is enabled)"
+}
+
+output "scale_down_policy_arn" {
+  value       = var.enable_autoscaling ? aws_autoscaling_policy.scale_down[0].arn : null
+  description = "ARN of the scale down policy (if autoscaling is enabled)"
+}

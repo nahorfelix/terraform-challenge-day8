@@ -38,7 +38,7 @@ variable "server_port" {
 variable "enable_autoscaling" {
   description = "Whether to enable auto scaling policies"
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "custom_tags" {
