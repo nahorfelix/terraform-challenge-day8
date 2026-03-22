@@ -39,12 +39,11 @@ resource "aws_launch_template" "example" {
 
   vpc_security_group_ids = [aws_security_group.instance.id]
 
-  user_data = base64encode(<<-EOF
-              #!/bin/bash
-              echo "<h1>Hello, World from ${var.cluster_name}!</h1>" > index.html
-              nohup busybox httpd -f -p ${var.server_port} &
-              EOF
-  )
+  # GOTCHA FIX 1: Use path.module for files inside the module
+  user_data = base64encode(templatefile("${path.module}/user-data.sh", {
+    cluster_name = var.cluster_name
+    server_port  = var.server_port
+  }))
 
   lifecycle {
     create_before_destroy = true
@@ -72,6 +71,15 @@ resource "aws_autoscaling_group" "example" {
     propagate_at_launch = true
   }
 
+  dynamic "tag" {
+    for_each = var.custom_tags
+    content {
+      key                 = tag.key
+      value               = tag.value
+      propagate_at_launch = true
+    }
+  }
+
   lifecycle {
     create_before_destroy = true
   }
@@ -79,21 +87,34 @@ resource "aws_autoscaling_group" "example" {
 
 # Security group for EC2 instances
 resource "aws_security_group" "instance" {
-  name = "${var.cluster_name}-instance"
+  name        = "${var.cluster_name}-instance"
+  description = "Security group for ${var.cluster_name} instances"
+  vpc_id      = data.aws_vpc.default.id
 
-  ingress {
-    from_port       = var.server_port
-    to_port         = var.server_port
-    protocol        = "tcp"
-    security_groups = [aws_security_group.alb.id]
-  }
+  tags = merge({
+    Name = "${var.cluster_name}-instance-sg"
+  }, var.custom_tags)
+}
 
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
+# GOTCHA FIX 2: Use separate resources instead of inline blocks for flexibility
+resource "aws_security_group_rule" "instance_ingress_alb" {
+  type                     = "ingress"
+  from_port                = var.server_port
+  to_port                  = var.server_port
+  protocol                 = "tcp"
+  source_security_group_id = aws_security_group.alb.id
+  security_group_id        = aws_security_group.instance.id
+  description              = "Allow inbound traffic from ALB"
+}
+
+resource "aws_security_group_rule" "instance_egress_all" {
+  type              = "egress"
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.instance.id
+  description       = "Allow all outbound traffic"
 }
 
 # Application Load Balancer
@@ -138,21 +159,87 @@ resource "aws_lb_target_group" "asg" {
 
 # Security group for ALB
 resource "aws_security_group" "alb" {
-  name = "${var.cluster_name}-alb"
+  name        = "${var.cluster_name}-alb"
+  description = "Security group for ${var.cluster_name} Application Load Balancer"
+  vpc_id      = data.aws_vpc.default.id
 
-  # Allow inbound HTTP requests
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+  tags = merge({
+    Name = "${var.cluster_name}-alb-sg"
+  }, var.custom_tags)
+}
+
+# GOTCHA FIX 2: Use separate resources instead of inline blocks for flexibility
+resource "aws_security_group_rule" "alb_ingress_http" {
+  type              = "ingress"
+  from_port         = 80
+  to_port           = 80
+  protocol          = "tcp"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.alb.id
+  description       = "Allow inbound HTTP traffic from internet"
+}
+
+resource "aws_security_group_rule" "alb_egress_all" {
+  type              = "egress"
+  from_port         = 0
+  to_port           = 0
+  protocol          = "-1"
+  cidr_blocks       = ["0.0.0.0/0"]
+  security_group_id = aws_security_group.alb.id
+  description       = "Allow all outbound traffic"
+}
+
+# Auto Scaling Policies (new in v0.0.2)
+resource "aws_autoscaling_policy" "scale_up" {
+  count                  = var.enable_autoscaling ? 1 : 0
+  name                   = "${var.cluster_name}-scale-up"
+  scaling_adjustment     = 1
+  adjustment_type        = "ChangeInCapacity"
+  cooldown              = 300
+  autoscaling_group_name = aws_autoscaling_group.example.name
+}
+
+resource "aws_autoscaling_policy" "scale_down" {
+  count                  = var.enable_autoscaling ? 1 : 0
+  name                   = "${var.cluster_name}-scale-down"
+  scaling_adjustment     = -1
+  adjustment_type        = "ChangeInCapacity"
+  cooldown              = 300
+  autoscaling_group_name = aws_autoscaling_group.example.name
+}
+
+resource "aws_cloudwatch_metric_alarm" "cpu_high" {
+  count               = var.enable_autoscaling ? 1 : 0
+  alarm_name          = "${var.cluster_name}-cpu-high"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = "120"
+  statistic           = "Average"
+  threshold           = "80"
+  alarm_description   = "This metric monitors ec2 cpu utilization"
+  alarm_actions       = [aws_autoscaling_policy.scale_up[0].arn]
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.example.name
   }
+}
 
-  # Allow all outbound requests
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+resource "aws_cloudwatch_metric_alarm" "cpu_low" {
+  count               = var.enable_autoscaling ? 1 : 0
+  alarm_name          = "${var.cluster_name}-cpu-low"
+  comparison_operator = "LessThanThreshold"
+  evaluation_periods  = "2"
+  metric_name         = "CPUUtilization"
+  namespace           = "AWS/EC2"
+  period              = "120"
+  statistic           = "Average"
+  threshold           = "10"
+  alarm_description   = "This metric monitors ec2 cpu utilization"
+  alarm_actions       = [aws_autoscaling_policy.scale_down[0].arn]
+
+  dimensions = {
+    AutoScalingGroupName = aws_autoscaling_group.example.name
   }
 }

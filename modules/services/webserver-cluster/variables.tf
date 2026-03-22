@@ -34,3 +34,15 @@ variable "server_port" {
   type        = number
   default     = 8080
 }
+
+variable "enable_autoscaling" {
+  description = "Whether to enable auto scaling policies"
+  type        = bool
+  default     = false
+}
+
+variable "custom_tags" {
+  description = "Custom tags to apply to all resources"
+  type        = map(string)
+  default     = {}
+}
